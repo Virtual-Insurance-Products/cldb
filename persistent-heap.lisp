@@ -103,7 +103,7 @@
 (deftag p/string-16 #b0110) ; string with up to 2**16 characters (NOT 2**16-1, since the empty string is a special constant)
 (deftag p/array-t-16 #b0111) ; array with up to 2**16 elements (as above)
 
-(deftag p/array-t-32 #b1000) ; an array of up to 2**32 elements BUT it's length must be a multiple of 2**16 since we encode the length in the pointer's 16 length bits and just ash it by 16
+(deftag p/array-t-32 #b1000) ; an array of up to 2**32 elements BUT it's length must be a multiple of 2**16+1 since we encode the index of the last element in the pointer's 16 length bits and just ash it by 16. Encoding the index of the last element gives the +1
 
 (deftag p/other #b1110) ; look in the 'length' field for extended tagged objects...
 (deftag p/lisp-object #b1111) ; lisp object serialize with the reader - rather expensive
@@ -308,7 +308,6 @@
 ;; I think I should make the changed block list the right length 
 
 ;; You can also open a heap, which returns the base array, changed block list (initially empty) and the mapped file
-;; I have returned those as a list to easily access them and not lose them (especially the mapped file)
 (defun open-heap (file)
   (let ((m (ccl:map-file-to-ivector file '(unsigned-byte 64))))
     (multiple-value-bind (arr offset)
@@ -319,7 +318,6 @@
                       :top (length arr)
                       :mapped-vector m))))
 
-;; at the moment this works on a mapped vector as returned as the 3rd list item of open-heap
 (defun close-mapped-file (file-heap)
   (ccl:unmap-ivector (file-heap-mapped-vector file-heap)))
 
