@@ -21,6 +21,12 @@ Apart from trivial-utf-8 the above can all be found at
 https://github.com/Virtual-Insurance-Products and have various
 dependencies themselves - probably most of the packages there. 
 
+** Postgres Mirroring
+At VIP we use CLDB to mirror (cache in memory) some tables from our
+Postgres database. The code for doing that mirroring is not here
+yet. I'm hoping to extract something to at least illustrate this
+soon...
+
 * Motivation
 In an OLTP type application which makes a large number of database
 queries during a single transaction, a database running in a separate
