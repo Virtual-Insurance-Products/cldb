@@ -145,8 +145,8 @@ strategy. The heap is therefore represented as:-
 
 1. A flat array of unsigned 64 bit integers, which can be loaded via
    ~mmap~
-2. An array of changed blocks - each of which is an array of is an
-   array of 4096 unsigned 64 bit integers. 
+2. An array of changed blocks - each of which is an array of 4096
+   unsigned 64 bit integers.
 
 This representation still gives a fairly small number of objects for
 the Lisp GC to consider for any 'reasonable' size of database.
