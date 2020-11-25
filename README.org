@@ -29,8 +29,8 @@ process and accessed over a socket is a performance bottleneck.
 # find a reference to Stonebreaker
 
 Modern computer systems allow a great many databases (including ours)
-to easily fit in memory. Loading the whole database into memory can
-eliminate a huge amount of overhead.
+to fit in main memory. Loading the whole database into process address
+space can eliminate a huge amount of overhead.
 
 For example, a common use case is simply looking up values of a column
 when we know the id of a database row. Some performance comparisons:-
