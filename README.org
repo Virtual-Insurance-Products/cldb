@@ -1,0 +1,377 @@
+#+TITLE: cldb.asd
+
+* Motivation
+In an OLTP type application which makes a large number of database
+queries during a single transaction, a database running in a separate
+process and accessed over a socket is a performance bottleneck.
+
+# find a reference to Stonebreaker
+
+Modern computer systems allow a great many databases (including ours)
+to easily fit in memory. Loading the whole database into memory can
+eliminate a huge amount of overhead.
+
+For example, a common use case is simply looking up values of a column
+when we know the id. Some performance comparisons:-
+#+begin_src lisp
+(in-package :vip)
+(with-database
+    (time (dotimes (i 1000) (dquery "select creation_date from quote where id=12345"))))
+;; ~250ms
+;; prepared queries get this down to about 160ms from a quick test
+
+;; with cldb...
+(cldb:with-database (base changed)
+  (time (dotimes (i 1000)
+          (let ((column (cldb::find-column base changed "quote" "creation_date")))
+            (cldb::column-value base changed column 12345)))))
+;; 14ms if we do column lookup each time
+
+(cldb:with-database (base changed)
+  (let ((column (cldb::find-column base changed "quote" "creation_date")))
+    (time (dotimes (i 1000)
+            (cldb::column-value base changed column 12345)))
+    (cldb::column-value base changed column 12345)))
+;; typcially 0.6ms
+
+
+#+end_src
+
+Of course, by simply using CL's provided data structures (arrays, CLOS
+instances, structs etc) we lose the ACID features provided by an RDBMS
+such as PostgresQL, along with automatic persistence to durable
+storage. Another problem is that if we try to store millions of
+attributes in memory naively, the lisp garbage collector becomes a
+bottleneck.
+
+One possible solution to some of these problems is to use persistent
+data structures (such as trees with relatively high branching factors)
+as is done in Clojure. These can give atomicity and isolation, but
+suffer from a lot of GC overhead, and although access times are
+better, they are still considerably slower than simple array access.
+
+CLDB aims to provide a database of sorts which:-
+1. Is much faster than Postgres /and/ persistent data structures as in
+   Clojure for simple queries (id -> value and value -> id lookup)
+   which can be composed
+2. Fully indexes almost all columns (only disabled for booleans)
+3. Has atomic updates - grab a mutable reference to the database to
+   change it, but no other process will see changes until the new copy
+   is swapped in
+4. Only a single thread should write at a time if you want a single
+   source of truth
+5. The whole database can be saved to disk relatively quickly, and
+   this process will either completely succeed or completely fail (it
+   writes to another file and atomically swaps it in)
+6. Loads database from disk /very/ quickly via mmap
+
+To achieve this it uses a block based copy-on-write approach to
+implement a persistent /heap/. This has a small amount of overhead
+compared to direct array access and generates a small number of
+objects for the garbage collector to manage (changed blocks) even in a
+database of millions of values.
+
+This persistent heap can then be used to store other data structures,
+such as arrays, strings etc, which are automatically atomic and
+isolated due to residing in a copy-on-write heap.
+
+At VIP the way we use this is as a /caching layer/ in front of a
+PostgresQL database. By cunning use of triggers on some tables (set up
+automatically when a table is registered) we can 'mirror' a postgres
+table into the CLDB in memory database. When the postgres transaction
+completes successfully, a single CLDB update thread will transfer the
+changes made in Postgres /into/ the CLDB copy and then atomically swap
+the 'current' version of the database in the lisp image.
+
+In this way we keep the advantages of PostgresQL in terms of
+reliability and ACIDity, and gain orders of magnitude of performance
+for many queries.
+
+This in memory CLDB copy of the database is then periodically
+'snapshot' to disk. An interesting consequence of the way this is
+implemented is that it makes no difference whether the snapshoting
+happens in the same Lisp image or a different one, so this is handled
+by a separate process.
+
+When the Lisp system starts up, it loads the CLDB database using mmap
+and then looks to see what transactions in the Postgres database are
+missing from the CLDB database since it was saved. These transactions
+are then loaded in before the system starts processing requests. This
+is quick. 
+
+
+* Design
+
+** Persistent Heap
+The lowest layer is a persistable heap of objects. Most simply this
+would be an array of 64 bit integers which are used to store various
+kinds of object. By storing them in an array like this, the lisp
+garbage collector only has to check one object (the array) to see if
+it is still referenced. This makes 'objects' in the persistent heap
+invisible to the normal Lisp GC, and means we have to implement our
+own garbage collector if we want to collect things. No garbage
+collector has been implemented at present.
+
+Representing the heap in this way gives very fast access (read and
+write) and we can very quickly write the whole heap out to
+disk. Reading the heap in /from/ disk is far quicker, as we can just
+use ~mmap~, which is what is done.
+
+In order to build an ACID (or at least ACI - we just use PostgresQL at
+VIP to get the 'D') database on top of this heap, the API for
+/changing/ things in the heap implements a copy-on-write (COW)
+strategy. The heap is therefore represented as:-
+
+1. A flat array of unsigned 64 bit integers, which can be loaded via
+   ~mmap~
+2. An array of changed blocks - each of which is an array of is an
+   array of 4096 unsigned 64 bit integers. 
+
+This representation still gives a fairly small number of objects for
+the Lisp GC to consider for any 'reasonable' size of database.
+
+The functions for accessing data FROM the heap (define in
+persistent-heap.lisp) take the base vector and changed blocks array as
+two separate parameters. All the objects created in the heap (eg cons
+cells and arrays) are returned as 'heap pointers' - fixnums which are
+tagged offsets into the heap. The tag is used to identify the object
+type. 
+
+Functions for writing objects INTO the heap all take a writable heap,
+which is a single object containing a bit more information. 
+
+** Column Database
+On top of the heap a column database is implemented. Columns are
+stored (mainly) as arrays mapping id (row index) to value for that row
+/combined with/ indexes for all the values mapping value -> row. The
+ID for each row is implicit and is simply it's index into the
+array. Each column's values are dynamically typed, so columns can
+contain a mixture of different types of values. The hash table index
+of those works on the 'pobject' representation, which is a single
+fixnum in 64 bit lisps. As all strings are interned in the heap, they
+are also just a single machine word for index lookup operations. 
+
+In our Postgres database we have used numeric IDs as primary keys in
+many tables, so these are used as the row index in CLDB. The arrays
+will not be completely allocated in memory, so creating excessively
+large arrays is fine /although/ when saving they will add to the file
+size. Provided the file system supports it, the file will be sparse
+(containing empty blocks) and so won't take up too much disk space
+either.
+
+*** Getting Started
+#+begin_src lisp
+(in-package :cldb)
+    
+;; 1. Create a new database and snapshot it
+(snapshot-database "/tmp/snap.db" (make-database))
+
+;; 2. Open database from a file as the top level database
+(open-database "/tmp/snap.db")
+
+;; 3. Create a new column in the database in a transaction
+(with-database-transaction (w)
+  ;; We have to either make columns with up to 65536 rows OR columns with 1+2**n rows up to some limit
+  ;; this is just over 1M rows.
+  ;; The resultant file size 
+  (make-simple-column w #x100001 "table" "column"))
+
+;; 4. Put some data into the column
+;; The columns can store any value we can encode into the pheap
+(with-database (base changed)
+  ;; The find-column function takes base vector and changed block list as it is a 'read' function
+  (let ((column (find-column base changed "table" "column")))
+    ;; make a writable snapshot
+    (with-database-transaction (writable)
+      (loop for i from 0 to 10
+         do (setf (column-value writable column i) (* i i)))
+      (setf (column-value writable column 11)
+            "This is a string")
+      )
+    ))
+
+;; passing atomic creates a temporary file to save and then moves the temporary over the previous once done
+(snapshot-database "/tmp/snap.db" *current-database* :atomic)
+
+;; close the database
+(close-database)
+
+;; open it again
+(open-database "/tmp/snap.db")
+
+;; read the data
+(with-database (base changed)
+  (let ((column (find-column base changed "table" "column")))
+    (loop for i from 0 to 11
+         collect (column-value base changed column i))))
+
+;; Change the data
+(with-database (base changed)
+  (let ((col (find-column base changed "table" "column")))
+    (with-database-transaction (w)
+      (setf (column-value w col 0) t
+            (column-value w col 1) nil
+            ;; general symbols are not presently supported...
+            ;; (column-value w col 2) 'hello
+            ;; though all strings are interned
+            (column-value w col 2) "hello"
+            ;; (and small strings are encoded in a single 64 bit word)
+            ;; rationals are stored as rationals
+            (column-value w col 3) 1/3
+            ))))
+
+;; column-index-lookup returns a function which will look up row IDs from a column value
+(with-database (base changed)
+  (let ((results nil))
+    (funcall (funcall (column-index-lookup (find-column base changed "table" "column"))
+                      base changed
+                      ;; this is the value we are looking for:-
+                      "hello")
+             (lambda (row)
+               (push row results)))
+    (reverse results)))
+
+;; ...which can also be written as:-
+(query (index-lookup "table" "column")
+       (collect "hello"))
+;; (see below for the query interface)
+
+#+end_src
+
+As much as possible lookups are only performed
+once. ~column-index-lookup~ takes the table and column name and
+returns a function to lookup column rows from values. When looking up
+different values in the same table and column this avoids the need
+to find the column itself in the heap repeatedly.
+
+Having found the column we can pass ~base~, ~changed~ and a value to
+the resultant function and it will lookup interned strings in the
+heap, and otherwise convert the lisp object into a 'pobject' - which
+is represented as a fixnum. All lisp objects which can be dealt with
+here will be converted to fixnums. *Note*: columns can't meaningfully
+store list values, cons cells or arrays, though the heap /can/. These
+are used in the heap to build columns, including their indexes (as
+hash tables). 
+
+Having resolved the value to a pobject we then get an iterator
+function which repeatedly calls a function passed to it with the row
+indexes which match the value.
+
+** Queries
+To provide a convenient interface to access information from this
+database there is a library of functions which can be composed
+together and a macro called ~cldb:query~.
+
+The following will find all 5 legged mammals by doing an index lookup
+to get all mammals then checking for the leg count being 5 and will
+return t if any are found:-
+#+begin_src lisp
+(cldb:query (cldb:index-lookup "animal" "type") ; find all foo by blah
+            (cldb:column-equal "animal" "legs" 5) ; with 5 legs
+            (cldb:exists "mammal"))
+#+end_src
+
+The following does the same, but by first doing an index lookup for
+all 5 legged animals and /then/ checking to see whether they are a
+mammal. It is likely to be quicker as there are probably more mammals
+than 5 legged animals.
+#+begin_src lisp
+(cldb:query (cldb:index-lookup "animal" "legs") ; find all foo by blah
+            (cldb:column-equal "animal" "type" "mammal") ; with 5 legs
+            (cldb:exists 5))
+#+end_src
+
+The ~query~ macro threads the parameters for base vector and changed
+blocks through the nested calls and uses ~compose~ to combine the
+query functions. The above macro expands to:-
+#+begin_src lisp
+(WITH-DATABASE
+  (#:BASE-VECTOR91268932 #:CHANGED-BLOCKS91268933)
+  (EXISTS #:BASE-VECTOR91268932
+          #:CHANGED-BLOCKS91268933
+          (COMPOSE (INDEX-LOOKUP #:BASE-VECTOR91268932
+                                 #:CHANGED-BLOCKS91268933
+                                 "animal"
+                                 "legs")
+                   (COLUMN-EQUAL #:BASE-VECTOR91268932
+                                 #:CHANGED-BLOCKS91268933
+                                 "animal"
+                                 "type"
+                                 "mammal"))
+          5))
+#+end_src
+
+It is also possible to omit the terminal clause:-
+#+begin_src lisp
+(cldb:query (cldb:index-lookup "animal" "legs") ; find all foo by blah
+            (cldb:column-equal "animal" "type" "mammal")) ; with 5 legs
+#+end_src
+
+Which gives
+#+begin_src lisp
+(WITH-DATABASE
+  (#:BASE-VECTOR91296885 #:CHANGED-BLOCKS91296886)
+  (COMPOSE (INDEX-LOOKUP #:BASE-VECTOR91296885
+                         #:CHANGED-BLOCKS91296886
+                         "animal"
+                         "legs")
+           (COLUMN-EQUAL #:BASE-VECTOR91296885
+                         #:CHANGED-BLOCKS91296886
+                         "animal"
+                         "type"
+                         "mammal")))
+#+end_src
+
+The result of this could then be passed to ~exists~, ~collect~ or
+~collect-1~. ~exists~ is defined as:-
+#+begin_src lisp
+(defun exists (b c cqf value)
+  (funcall (funcall cqf b c value)
+           (lambda (x)
+             (declare (ignore x))
+             (return-from exists t))))
+#+end_src
+
+** Metaclass
+We can also do the following:-
+
+#+begin_src lisp
+;; as the CLDB metaclass won't create columns in the databaes we must do that manually for now
+;; (in our system the columns come from the postgres database)
+(with-database-transaction (w)
+  (loop for slot in '("name" "full_name" "password_hash" "salt")
+     do (make-simple-column w #x100001 "user_account" slot)))
+
+
+(defclass user-account ()
+  ((name :reader name :type string)
+   (full-name :reader full-name :type string)
+   (password-hash :reader password-hash :type string)
+   (salt :reader salt :type string))
+  (:metaclass cldb-class))
+
+;; (cldb:get-instance 'user-account 1)
+
+
+(defclass post ()
+  ((user-account :type user-account :initarg :user-account :reader user-account)
+   (message :type string :initarg :message :reader message)
+   (date :type integer :initarg :date :reader date))
+  (:metaclass cldb-class))
+
+#+end_src
+
+The values for the slots are read directly from the persistent heap
+and not cached in the object in any way. At VIP this is used as a way
+to access objects mirrored from a postgres database, so we have not,
+as yet, made a way to /create/ or /mutate/ these objects. This would
+certainly be possible, but would (of course) require a reference to a
+writeable heap. There is currently no dynamically bound writeable
+heap - all the heap modification functions take it as an explicit
+parameter by design. 
+
+Queries can also be performed at the metaclass level and the query
+optimzier (invoked from the ~query~ macro) will attempt to simplify
+any lookups avoiding generating CLOS objects only to access a single
+slot value from them and will just generate appropriate ~index-lookup~
+and ~column-value~ compositions where possible. 
