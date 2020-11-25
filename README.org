@@ -151,7 +151,7 @@ strategy. The heap is therefore represented as:-
 This representation still gives a fairly small number of objects for
 the Lisp GC to consider for any 'reasonable' size of database.
 
-The functions for accessing data FROM the heap (define in
+The functions for accessing data FROM the heap (defined in
 persistent-heap.lisp) take the base vector and changed blocks array as
 two separate parameters. All the objects created in the heap (eg cons
 cells and arrays) are returned as 'heap pointers' - fixnums which are
