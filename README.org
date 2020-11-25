@@ -1,5 +1,26 @@
 #+TITLE: cldb.asd
 
+A fast, atomic, consistent, isolated memory based database in Common
+Lisp. 
+
+* Requirements
+*CLDB* currently only works in Clozure Common Lisp, as this is what we
+use internally. Supporting other Lisp implementations should be
+straightforward. It is mainly the mmap implementation which would need
+replacing. From some very quick performance testing, Clozure CL seemed
+to perform /better/ than I could get SBCL to perform, though I don't
+know why and haven't looked into it.
+
+This package also depends on:-
+- vip-clim-core
+- anaphors
+- clim-web
+- /and/ trivial-utf-8
+
+Apart from trivial-utf-8 the above can all be found at
+https://github.com/Virtual-Insurance-Products and have various
+dependencies themselves - probably most of the packages there. 
+
 * Motivation
 In an OLTP type application which makes a large number of database
 queries during a single transaction, a database running in a separate
@@ -12,7 +33,7 @@ to easily fit in memory. Loading the whole database into memory can
 eliminate a huge amount of overhead.
 
 For example, a common use case is simply looking up values of a column
-when we know the id. Some performance comparisons:-
+when we know the id of a database row. Some performance comparisons:-
 #+begin_src lisp
 (in-package :vip)
 (with-database
@@ -39,7 +60,7 @@ when we know the id. Some performance comparisons:-
 
 Of course, by simply using CL's provided data structures (arrays, CLOS
 instances, structs etc) we lose the ACID features provided by an RDBMS
-such as PostgresQL, along with automatic persistence to durable
+such as PostgresQL, including automatic persistence to durable
 storage. Another problem is that if we try to store millions of
 attributes in memory naively, the lisp garbage collector becomes a
 bottleneck.
@@ -52,22 +73,22 @@ better, they are still considerably slower than simple array access.
 
 CLDB aims to provide a database of sorts which:-
 1. Is much faster than Postgres /and/ persistent data structures as in
-   Clojure for simple queries (id -> value and value -> id lookup)
-   which can be composed
+   Clojure for simple queries (id -> value and value -> id lookup);
+   with those queries being composable
 2. Fully indexes almost all columns (only disabled for booleans)
 3. Has atomic updates - grab a mutable reference to the database to
    change it, but no other process will see changes until the new copy
    is swapped in
-4. Only a single thread should write at a time if you want a single
-   source of truth
-5. The whole database can be saved to disk relatively quickly, and
-   this process will either completely succeed or completely fail (it
-   writes to another file and atomically swaps it in)
-6. Loads database from disk /very/ quickly via mmap
+4. Only supports writing by one thread at a time if you want a single,
+   consistent database
+5. Allows quickly saving the whole database to disk, and this will
+   either completely succeed or completely fail (it writes to another
+   file and atomically swaps it in)
+6. Loads databases from disk /very/ quickly via mmap
 
 To achieve this it uses a block based copy-on-write approach to
 implement a persistent /heap/. This has a small amount of overhead
-compared to direct array access and generates a small number of
+compared to direct array access, and generates a small number of
 objects for the garbage collector to manage (changed blocks) even in a
 database of millions of values.
 
@@ -75,10 +96,10 @@ This persistent heap can then be used to store other data structures,
 such as arrays, strings etc, which are automatically atomic and
 isolated due to residing in a copy-on-write heap.
 
-At VIP the way we use this is as a /caching layer/ in front of a
-PostgresQL database. By cunning use of triggers on some tables (set up
+At VIP we use this is as a /caching layer/ in front of a PostgresQL
+database. By cunning use of triggers on some tables (set up
 automatically when a table is registered) we can 'mirror' a postgres
-table into the CLDB in memory database. When the postgres transaction
+table into the CLDB in-memory database. When the postgres transaction
 completes successfully, a single CLDB update thread will transfer the
 changes made in Postgres /into/ the CLDB copy and then atomically swap
 the 'current' version of the database in the lisp image.
@@ -87,17 +108,17 @@ In this way we keep the advantages of PostgresQL in terms of
 reliability and ACIDity, and gain orders of magnitude of performance
 for many queries.
 
-This in memory CLDB copy of the database is then periodically
-'snapshot' to disk. An interesting consequence of the way this is
-implemented is that it makes no difference whether the snapshoting
-happens in the same Lisp image or a different one, so this is handled
-by a separate process.
+This in memory CLDB copy of the database is periodically 'snapshot' to
+disk. An interesting consequence of the way this is implemented is
+that it makes no difference whether the snapshoting happens in the
+same Lisp image or a different one, so this is handled by a separate
+process.
 
 When the Lisp system starts up, it loads the CLDB database using mmap
 and then looks to see what transactions in the Postgres database are
 missing from the CLDB database since it was saved. These transactions
-are then loaded in before the system starts processing requests. This
-is quick. 
+are loaded in before the system starts processing requests. This is
+quick.
 
 
 * Design
@@ -115,7 +136,7 @@ collector has been implemented at present.
 Representing the heap in this way gives very fast access (read and
 write) and we can very quickly write the whole heap out to
 disk. Reading the heap in /from/ disk is far quicker, as we can just
-use ~mmap~, which is what is done.
+use ~mmap~.
 
 In order to build an ACID (or at least ACI - we just use PostgresQL at
 VIP to get the 'D') database on top of this heap, the API for
@@ -266,7 +287,7 @@ The following will find all 5 legged mammals by doing an index lookup
 to get all mammals then checking for the leg count being 5 and will
 return t if any are found:-
 #+begin_src lisp
-(cldb:query (cldb:index-lookup "animal" "type") ; find all foo by blah
+(cldb:query (cldb:index-lookup "animal" "type") ; find all animal of some type
             (cldb:column-equal "animal" "legs" 5) ; with 5 legs
             (cldb:exists "mammal"))
 #+end_src
@@ -276,14 +297,16 @@ all 5 legged animals and /then/ checking to see whether they are a
 mammal. It is likely to be quicker as there are probably more mammals
 than 5 legged animals.
 #+begin_src lisp
-(cldb:query (cldb:index-lookup "animal" "legs") ; find all foo by blah
-            (cldb:column-equal "animal" "type" "mammal") ; with 5 legs
+(cldb:query (cldb:index-lookup "animal" "legs")
+            (cldb:column-equal "animal" "type" "mammal")
             (cldb:exists 5))
 #+end_src
 
 The ~query~ macro threads the parameters for base vector and changed
 blocks through the nested calls and uses ~compose~ to combine the
-query functions. The above macro expands to:-
+query functions. *Note* ~cldb:compose~ is not the standard compose
+function. It composes CQFs (composable query functions). The above
+macro expands to:-
 #+begin_src lisp
 (WITH-DATABASE
   (#:BASE-VECTOR91268932 #:CHANGED-BLOCKS91268933)
@@ -303,8 +326,8 @@ query functions. The above macro expands to:-
 
 It is also possible to omit the terminal clause:-
 #+begin_src lisp
-(cldb:query (cldb:index-lookup "animal" "legs") ; find all foo by blah
-            (cldb:column-equal "animal" "type" "mammal")) ; with 5 legs
+(cldb:query (cldb:index-lookup "animal" "legs")
+            (cldb:column-equal "animal" "type" "mammal"))
 #+end_src
 
 Which gives
@@ -375,3 +398,23 @@ optimzier (invoked from the ~query~ macro) will attempt to simplify
 any lookups avoiding generating CLOS objects only to access a single
 slot value from them and will just generate appropriate ~index-lookup~
 and ~column-value~ compositions where possible. 
+
+* Future Work
+In order to achieve durability in an in memory database with periodic
+snapshots the obvious solution is to simply log all updates. This is
+the key missing part needed to make CLDB a viable database on its
+own. Since, at VIP, we were already using PostgresQL as our main RDBMS
+and have no near term plans to change that, we have used PostgresQL to
+handle the durability. This works very well from a reliability
+standpoint, though the way it achieves this is far more complicated
+than a simple logging system and bottlenecks write performance
+significantly. 
+
+As noted in the *Metaclass* section above, no object creation or
+mutation for the metaclass has been implemented either. At VIP the
+mutation is all handled through Postgres (in various ways) and so the
+CLDB objects only serve for reading data. To extend this to be more of
+a full, independent, database would require implementing that, along
+with other write methods.
+
+
