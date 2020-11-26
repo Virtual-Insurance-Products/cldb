@@ -5,7 +5,7 @@ Lisp.
 
 * Requirements
 *CLDB* currently only works in Clozure Common Lisp, as this is what we
-use internally. Supporting other Lisp implementations should be
+use internally. Supporting other Lisp implementations /might/ be
 straightforward. It is mainly the mmap implementation which would need
 replacing. From some very quick performance testing, Clozure CL seemed
 to perform /better/ than I could get SBCL to perform, though I don't
@@ -14,7 +14,6 @@ know why and haven't looked into it.
 This package also depends on:-
 - vip-clim-core
 - anaphors
-- clim-web
 - /and/ trivial-utf-8
 
 Apart from trivial-utf-8 the above can all be found at
