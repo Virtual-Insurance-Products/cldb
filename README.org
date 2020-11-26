@@ -27,6 +27,32 @@ Postgres database. The code for doing that mirroring is not here
 yet. I'm hoping to extract something to at least illustrate this
 soon...
 
+* Caveats and Limitations
+There is no garbage collection of any kind for the persistent
+heap. There is also no way to manually delete things *yet*. Also,
+columns must be allocated with a fixed size. I had intended to then
+allow an overflow array in case they fill up. This would have some
+minor performance implication when it happens. This is not implemented
+yet though.
+
+As an alternative to filling up a column causing an overflow column to
+be created, it would be straightforward to just re-allocate the column
+and then /clear/ the original column by zeroing it out. When the heap
+is snapshot this would leave holes in the file, and the memory used by
+the holes would be very small. In effect, because of the layer of
+abstraction above direct memory access, rather than compacting the
+heap to clear things out, one can just leave big holes in it with
+almost no overhead. This is not yet implemented though.
+
+To deal with this, it's fine to allocate columns which are /far/
+bigger than required. As the allocated array will initially be empty,
+it will not consume actual disk space /or/ space in RAM. HFS+ doesn't
+support files with holes though, so snapshots on HFS+ will end up very
+large this way.
+ 
+I also have not yet implemented strings larger than ~64kb. It wouldn't
+be difficult to do so, it just wasn't a priority.
+
 * Motivation
 In an OLTP type application which makes a large number of database
 queries during a single transaction, a database running in a separate

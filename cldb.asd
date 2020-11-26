@@ -3,8 +3,7 @@
   :description "Common Lisp Database"
   :author "VIP"
   :serial t
-  :depends-on ( ;; "vip-utils"
-               "vip-clim-core" "trivial-utf-8" "anaphors" "clim-web")
+  :depends-on ("vip-clim-core" "trivial-utf-8" "anaphors")
   
   :components ((:file "package")
                ;; (:file "iterators")
