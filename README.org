@@ -3,6 +3,26 @@
 A fast, atomic, consistent, isolated memory based database in Common
 Lisp. 
 
+* Quickstart
+Install [[https://www.quicklisp.org/beta/][quicklisp]] and [[https://ccl.clozure.com][Clozure Common Lisp]] if you don't have them already. 
+
+#+begin_src sh
+cd ~/quicklisp/local-projects
+git clone https://github.com/Virtual-Insurance-Products/cldb
+git clone https://github.com/Virtual-Insurance-Products/vip-clim-core  
+git clone https://github.com/Virtual-Insurance-Products/anaphors
+git clone https://github.com/Virtual-Insurance-Products/cybertiggyr-time
+git clone https://github.com/Virtual-Insurance-Products/simple-parser
+git clone https://github.com/Virtual-Insurance-Products/vip-utils
+git clone https://github.com/Virtual-Insurance-Products/event-handlers
+
+ccl64 -e '(ql:quickload :cldb)' # or using SLIME in emacs just do (ql:quickload :cldb)
+#+end_src
+
+Then see the Design/Column Database/Getting Started section below for
+an example of creating a database, putting information into it, saving
+it, reloading it, changing it and querying it. 
+
 * Requirements
 *CLDB* currently only works in Clozure Common Lisp, as this is what we
 use internally. Supporting other Lisp implementations /might/ be
