@@ -364,8 +364,17 @@
                 (and (equal (name col) "name") (equal (table col) "brand")))
               (with-database (b c) (all-columns b c)))
 
+(define-condition missing-cldb-column (error)
+  ((table-name :initarg :table-name :reader table-name)
+   (column-name :initarg :column-name :reader column-name)))
+
+(defmethod print-object ((x missing-cldb-column) (s stream))
+  (format s "Missing CLDB Column ~A.~A" (table-name x) (column-name x)))
+
+;; (error 'missing-cldb-column :table-name "foo" :column-name "bar")
+
 ;; the following could be implemented trivially in terms of the above. I might do that. Do I need this to be fast?
-(defun find-column (b c table name)
+(defun find-column (b c table name &optional (error-if-not-found t))
   (let ((ptable (find-unique-string b c table))
         (pname (find-unique-string b c name)))
     (or
@@ -379,7 +388,8 @@
             return (make-instance 'column :pointer col
                                   :base-vector b :changed-blocks c))))
      
-     (error "No such column: ~A.~A" table name))))
+     (when error-if-not-found
+       (error 'missing-cldb-column :table-name table :column-name name)))))
 
 
 
