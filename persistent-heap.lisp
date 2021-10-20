@@ -313,14 +313,24 @@
     (multiple-value-bind (arr offset)
         (array-displacement m)
       (declare (ignore offset))         ; which must be 1
-      (make-file-heap :base-vector arr
-                      :changed-blocks (make-array (1+ (ash (length arr) -12)) :initial-element nil)
-                      :top (length arr)
-                      :mapped-vector m))))
+      (let* ((blocks (make-array (1+ (ash (length arr) -12))
+                                 :initial-element nil))
+             (heap (make-file-heap :base-vector arr
+                                   :changed-blocks blocks
+                                   :top (length arr)
+                                   :mapped-vector m)))
+        ;; The ivector may be shared between heap objects (see the macro
+        ;; `with-database-transaction' so we register the finalizer for
+        ;; the ivector, not for the heap.
+        (ccl:terminate-when-unreachable m #'ccl:unmap-ivector)
+        heap))))
 
+;; at the moment this works on a mapped vector as returned as the 3rd list item of open-heap
 (defun close-mapped-file (file-heap)
-  (ccl:unmap-ivector (file-heap-mapped-vector file-heap)))
-
+  ;; The vector may be shared between different file heaps so closing
+  ;; the mapped file just removed the reference. Unmapping the vector is
+  ;; left to the finalizer.
+  (setf (file-heap-mapped-vector file-heap) nil))
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
